@@ -1,0 +1,173 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{caption}
+\usepackage{placeins}
+
+\title{Constructing an Implied Volatility Surface from Real Option Chain Data}
+\author{Max Rayworth}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+% ------------------------------------------------------------------
+\section{Introduction and Motivations}
+% 2-3 sentences: what an implied vol surface is, and why it matters
+% for a trading/risk desk. E.g. it's the market's own forward-looking
+% estimate of volatility across strikes and maturities, and it feeds
+% pricing, hedging, and risk (VaR, stress testing) for any equity
+% derivatives book.
+
+In this project, I aimed to construct, smooth and analyse an Implied Volatility Surface alongside its respective 2D Volatility Smile using real-time market options chain data. Having completed the Citi MQA job simulation on Forage, I was exposed to the Black-Scholes equation, which assumes constant volatility when pricing options. This assumption represents a clear flaw in the pricing process, so I wanted to uncover how traders approach pricing different strikes and maturities with different expected volatilities by mathematically extracting these volatilities and constructing a continuous volatility surface.
+
+
+% ------------------------------------------------------------------
+\section{Data}
+% Source (yfinance), underlying chosen and why (liquidity), date
+% pulled, number of expiries and strikes, raw row counts.
+
+Within my \texttt{data\_fetcher.py} file, I connected to Yahoo Finance via \texttt{yfinance} to retrieve live Spot Prices ($S_0$) from the most recent 1-day trading history of a specific asset. SPY (representing the S\&P 500 index) was chosen as it is   widely regarded as the most liquid options market in the world, so provides continuous bid-ask quotes with very few missing data gaps. 
+
+I then iterated through all expiration dates ($T$) to fetch the raw call options chains, extracting all relevant attributes. Having converted the calendar expiration dates into annualised time-to-maturity ($T = \mathit{days}/365$), the data was ready to use, as summarised in Table 1.
+
+\begin{table}[h!]
+\centering
+\caption{Summary of raw option chain data pulled for SPY ($S_0 = \$763.53$)}
+\label{tab:raw_data}
+\begin{tabular}{ccc}
+\toprule
+\textbf{Expiry} & \textbf{Calls (raw)} & \textbf{Days to Expiry} \\
+\midrule
+2026-09-11 & 26 & 22 \\
+2026-09-18 & 31 & 29 \\
+2026-09-25 & 16 & 36 \\
+2026-10-02 & 13 & 43 \\
+2026-10-16 & 34 & 57 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ------------------------------------------------------------------
+\newpage
+
+\section{Methodology}
+
+\subsection{Data cleaning}
+% State your filtering criteria explicitly and justify each one.
+% E.g. "Quotes with zero volume and zero open interest were dropped
+% since these are likely stale and not representative of a live,
+% tradeable market."
+
+To reduce microstructure noise, I applied a multi-stage filtering pipeline throughout the pricing process (see bullet points):
+
+\begin{itemize}
+    \item \textbf{Quote \& Liquidity Filters}: Any contracts with non-positive quotes or low trading volume were filtered out. Low liquidity can create stale prices and wider bid-ask spreads are more common, distorting implied volatilities.
+    \item \textbf{Mid-Price Calculation}: Estimated the fair value of each contract using $P_{\text{mid}} = \frac{\text{bid} + \text{ask}}{2}$ rather than the last traded price, as this could be outdated.
+\end{itemize}
+
+
+\subsection{Implied volatility extraction}
+% Explain the root-finding approach. Include the Black-Scholes
+% formula you inverted.
+
+The Black-Scholes price of a European call is
+\begin{equation}
+C(S_0, K, T, r, \sigma) = S_0 \Phi(d_1) - K e^{-rT} \Phi(d_2),
+\end{equation}
+where $S_0$ is the current underlying spot price, $K$ is the contract strike price, $T$ is the annualized time-to-maturity (in years), and $r = 0.05$ ($5\%$) is the assumed constant risk-free rate, and
+\begin{equation}
+d_1 = \frac{\ln(S_0/K) + (r + \tfrac{1}{2}\sigma^2)T}{\sigma\sqrt{T}}, \qquad
+d_2 = d_1 - \sigma\sqrt{T}.
+\end{equation}
+For each observed market price $P_{\text{mid}}$, the implied volatility must be calculated using root-finding techniques, because Black-Scholes cannot be inverted to solve for volatility. Hence $\hat{\sigma}$ solves
+\begin{equation}
+C(S_0, K, T, r, \hat{\sigma}) = P_{\text{mid}},
+\end{equation}
+where $P_{\text{mid}}$ is the observed market mid-price, found numerically via Brent's method over $\sigma \in (10^{-6}, 5.0)$.
+\begin{itemize}
+    \item \textbf{Implied Volatility Bounds ($5\% < \hat{\sigma} < 80\%$)}: Low implied volatility amongst options on broad market index funds is very rare, and so is hyper-volatility represented by 80+\%. These values are filtered to remove numerical artifacts.
+    \item \textbf{Moneyness Range ($0.70 \cdot S_0 \le K \le 1.30 \cdot S_0$)}: Deep In-the-Money (ITM) or Deep Out-of-the-Money (OTM) options have very low trading volume and wide bid-ask spreads. Their extracted implied volatilities are highly sensitive to price noise (small Vega means small price changes imply large IV swings). 
+    \item \textbf{Minimum Maturity} ($T \ge 0.05\text{ years}$): Options near their expiration are hyper-sensitive to underlying price changes. As T approaches, the options premiums drop to pennies, so bid-ask spreads are proportionally huge compared to the contract value. 
+\end{itemize}
+
+\subsection{Smoothing}
+% Describe your chosen smoothing method (spline / polynomial / SVI)
+% and briefly why.
+
+\begin{itemize}
+    \item \textbf{Grid Construction}: Raw option data is irregularly spaced across strikes and expirations, so I defined a uniform 2D evaluation grid to evaluate implied volatility continuously across the domain.
+    \item \textbf{Interpolation and Extrapolation}: Points outside of the raw dataset were handled by using nearest neighbour extrapolation to ensure the boundaries of the grid don't contain empty values.
+    \item \textbf{Surface Smoothing}: Applied Gaussian smoothing filter with $\sigma = 1.25$ to remove small bumps in the surface whilst preserving the general features of the graph.
+\end{itemize}
+
+% ------------------------------------------------------------------
+\section{Results}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.75\textwidth]{Vol_Smile.png}
+\caption{Implied volatility smile slice across strike prices for a maturity of $T \approx 0.49$ years.}
+\label{fig:Vol_Smile.png}
+\end{figure}
+
+\textbf{Institutional Hedging Demand}
+
+The volatility smile above shows a clear negative skew, suggestive of the market's expectation of heightened downside volatility. This skew is expected for indices like the S\&P 500, as it is a common investment strategy to invest in out-of-the-money put options. This hedges against market crashes, as investors can then sell the asset at the pre-determined strike price, which would be higher than the depressed post-crash spot price. This extra demand drives up the market price for these options, and by Black-Scholes, looking at each option discretely, a price rise implies an IV rise.
+
+\vspace{0.5em}
+\textbf{Fat-Tailed Return Distributions}
+
+Moreover, market returns show 'fat-tailed' downside risk, where declines are sharper than upside advances. This causes the option pricing to deviate from the constant volatility assumption of the Black-Scholes model. Localised bumps around the \$600 – \$650 strike likely reflect residual pricing noise from thinner liquidity at these strikes, rather than a genuine feature of the market's volatility expectations.
+
+\newpage 
+
+
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.75\textwidth]{Vol_Surface.png}
+\caption{Implied volatility surface across strike and maturity - spot price refreshed between data pull and plotting.}
+\label{fig:surface}
+\end{figure}
+
+\textbf{Term Structure and Skew Attenuation}
+
+The volatility skew is much sharper and steeper at short maturities, flattening out significantly as maturities lengthen. This goes against the trend of absolute price uncertainty scaling with time, as in the short run, immediate events like CPI prints and central bank decisions can cause violent gaps in price. Over longer time horizons, stochastic volatility shows mean reversion, and total variance averages out across the lifespan of the contract. As a result, short-term volatility shocks exert a diminishing influence on integrated variance, leading to a progressive flattening of the implied volatility skew for longer maturities.
+
+\vspace{0.5em}
+\textbf{Surface Smoothness and Microstructure Noise}
+
+Additionally, we can see the smoothness of the graph improve as time to maturity increases. For options with low time to maturities, their time value has nearly completely eroded, known as Theta decay, therefore their total price tag is tiny. Since exchanges force options to trade in discrete tick sizes, a single cent change in a price can represent a large price swing. This is accentuated by the Vega of these short-term options. Vega measures the amount an option's price changes per 1\% change in IV. Short-dated options are not sensitive to changes in IV, so their Vegas are small. The relationship between price shift and implied volatility is governed by:
+$$\Delta\text{IV} \approx \frac{\Delta\text{Price}}{\text{Vega}}$$
+so a tiny shift in price has a massive effect on the IV change due to how small the Vega is.
+
+\FloatBarrier %
+% ------------------------------------------------------------------
+\newpage
+
+\section{Discussion and Limitations}
+\subsection{Data and Modelling Limitations} 
+
+\begin{itemize}
+    \item \textbf{Single Intraday Snapshot}: The volatility surface represents a frozen image of market expectations at one point. Option prices change continuously during market hours, so the snapshot taken could be 10 minutes before a central bank announcement which shifts the volatility. Bid-ask spreads in the short-term can also widen or skew due to order flow, and the temporary distortions as a result can be indistinguishable from more permanent structural features of the market. 
+    \item \textbf{Surface Construction \& Arbitrage Rules}: To create a complete surface, the model must extrapolate beyond the available market data. This is a purely mathematical process which may generate intermediate IV points across the grid that can create arbitrage violations. 
+    \item \textbf{Constant Risk-Free Rate}: I used a constant risk-free rate instead of modelling a term-structure discount curve across maturities. This would have mispriced the cost-of-carry component for the longer-dated options. Given that the Black-Scholes model prices options depending on both interest rates and volatility, an inaccurate rate input may shift the IV too, producing artificial distortions in the volatility skew.
+\end{itemize}
+
+\vspace{0.8em}
+
+\subsection{Future Additions} 
+
+Given more time and computational resources, I would have looked into these extensions:
+
+\begin{itemize}
+    \item \textbf{Arbitrage-Free Smoothing}: Use SVI (Stochastic Volatility Inspired) parametrisation to guarantee that the extreme OTM strikes asymptote to linear curves
+    \item \textbf{Local Volatility Modelling}: Where implied volatility is the constant volatility  you would need to put into Black-Scholes to match a single option's market price over its lifespan, local volatility is the instantaneous volatility of the asset at a certain stock price at an exact time. Dupire's Local Volatility Formula maps a continuous IV surface into an instantaneous local volatility surface, which helps for pricing exotic options, where we need to know how volatility behaves at intermediate points along the path.
+    \item \textbf{Cross-Asset \& Temporal Comparisons}: Develop the model to track volatility surfaces across multiple trading days to observe skew shifts over time, and the effect of macro factors on trading decisions. Also, enable multiple surfaces representing different assets to be rendered onto one graph to help with the risk management of developing a portfolio.
+\end{itemize}
+
+\end{document}
